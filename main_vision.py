@@ -1,7 +1,6 @@
 import os
 import cv2
 import time
-
 from robot_api.robot.robot import Robot
 from vision_api.api_vision import VisionAPI
 from vision_api.enums.classes_enum import CameraModel, RobotModel, MarkerModel

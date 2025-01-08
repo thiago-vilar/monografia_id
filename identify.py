@@ -41,7 +41,7 @@ class DetectMedicine:
             return self.corners
         print(f"Marker with ID {self.stag_id} not found in one of the images.")
         return None
-   
+
     def calculate_pixel_size_mm(self):
         if self.corners is not None:
             width_px = np.max(self.corners[:, 0]) - np.min(self.corners[:, 0])
@@ -49,7 +49,7 @@ class DetectMedicine:
         else:
             self.pixel_size_mm = None
             print("Failed to detect corners to calculate pixel size.")
-    
+
     def homogenize_image_based_on_corners(self, image, corners):
         if corners is None:
             print("Corners not detected.")
@@ -84,30 +84,38 @@ class DetectMedicine:
         crop_height = int(70 * pixel_size_mm)
         crop_y_adjustment = int(15 * pixel_size_mm)
 
-        # Calcula os limites de recorte
         x_min = max(centroid_x - crop_width, 0)
         x_max = min(centroid_x + crop_width, image.shape[1])
         y_min = max(centroid_y - crop_height - crop_y_adjustment, 0)
         y_max = min(centroid_y - crop_y_adjustment, image.shape[0])
 
-        # Desenha o retângulo na imagem
         cv2.rectangle(image, (x_min, y_min), (x_max, y_max), (0, 255, 0), 1)
 
-        # Armazena as coordenadas de recorte
         self.scan_areas[self.stag_id] = (x_min, x_max, y_min, y_max)
-
-        # Exibe a imagem
         plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         plt.title('Image with Scan Area')
         plt.show()
 
-        # Retorna as coordenadas de recorte
         return (x_min, x_max, y_min, y_max)
 
     def crop_scan_area(self, image, crop_coords):
         x_min, x_max, y_min, y_max = crop_coords
         cropped_image = image[y_min:y_max, x_min:x_max]
         return cropped_image
+    
+    def filter_pdi(self, image):
+        """Applies Gaussian blur followed by a Sobel filter to enhance horizontal edges of a reflective object."""
+        img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        img_blur = cv2.GaussianBlur(img_gray, (3, 3), 0)
+        filter = np.array([
+            [0,  1, 0],
+            [1, -4.3, 1],
+            [0,  1, 0]
+        ])
+        ddepth = cv2.CV_16S
+        img_filtered = cv2.filter2D(img_blur, ddepth, filter)
+        abs_img_filtered = cv2.convertScaleAbs(img_filtered)
+        return abs_img_filtered
 
     def remove_background(self, image_np_array):
         is_success, buffer = cv2.imencode(".png", image_np_array)
@@ -135,7 +143,7 @@ class DetectMedicine:
             largest_contour = max(contours, key=cv2.contourArea)
             mask_with_contours = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGRA)
             mask_with_contours[:, :, 3] = mask
-            cv2.drawContours(mask_with_contours, [largest_contour], -1, (0, 255, 0, 255), 2)
+            cv2.drawContours(mask_with_contours, [largest_contour], -1, (0, 255, 0, 255), 1)
             return mask_with_contours, largest_contour
         else:
             return None
@@ -146,18 +154,22 @@ class DetectMedicine:
             return None
 
         x, y, w, h = cv2.boundingRect(largest_contour)
-        width_mm = w * self.pixel_size_mm
-        height_mm = h * self.pixel_size_mm
-        area_mm2 = width_mm * height_mm  
-        extent = cv2.contourArea(largest_contour) / (w * h) if w * h != 0 else 0  
+        width_mm = w * self.pixel_size_mm 
+        height_mm = h * self.pixel_size_mm 
+        area_bb_mm2 = width_mm * height_mm  
+        mask_area_mm2 = cv2.contourArea(largest_contour) * (self.pixel_size_mm ** 2)
+        background_area_mm2 = area_bb_mm2 - mask_area_mm2  
 
-        print(f"Bounding box at ({x}, {y}), width: {width_mm:.1f}mm, height: {height_mm:.1f}mm, Area: {area_mm2:.2f} mm^2")
-        print(f"Extent: {extent:.2f}")  
+        print(f"Bounding box at ({x}, {y}), width: {width_mm:.1f}mm, height: {height_mm:.1f}mm, Bounding Box Area: {area_bb_mm2:.2f} mm^2")
+        print(f"Largest Contour Area: {mask_area_mm2:.2f} mm^2")
+        print(f"Background Area (Bounding Box - Largest Contour Area): {background_area_mm2:.2f} mm^2")
 
         measured_img = img_med.copy()
-        cv2.rectangle(measured_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        return (width_mm, height_mm, area_mm2, extent), measured_img
-
+        cv2.rectangle(measured_img, (x, y), (x + w, y + h), (0, 255, 0), 1)  
+        # Adiciona texto com a largura e a altura
+        cv2.putText(measured_img, f"Width: {width_mm:.1f}mm", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.putText(measured_img, f"Height: {height_mm:.1f}mm", (x, y - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        return (width_mm, height_mm, area_bb_mm2, mask_area_mm2, background_area_mm2), measured_img
 
     def display_image(self, image, title):
         if image.ndim == 2 or image.shape[2] == 1:
@@ -166,6 +178,18 @@ class DetectMedicine:
             plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         plt.title(title)
         plt.show()
+
+    def classify_medicine_type(self, width_mm, area_mm2):
+        # Ajuste dos limites conforme necessário
+        if 10 <= width_mm <= 17.9 and 150 <= area_mm2 <= 700:  # Ampoule
+            return "Ampoule"
+        elif 18 <= width_mm <= 40.9 and 275 <= area_mm2 <= 1900:  # Flask
+            return "Flask"
+        elif 41 <= width_mm <= 55 and 1901 <= area_mm2 <= 4000:  # Pill
+            return "Pill"
+        else:
+            return "Unknown"
+
 
     def process_image(self):
         corners_image = self.detect_stag(self.image)
@@ -177,15 +201,21 @@ class DetectMedicine:
         cropped_image = self.crop_scan_area(homogenized_image, crop_coords_image)
         self.display_image(cropped_image, 'Medicine Image')
 
-        # Redimensiona a imagem negativa para corresponder ao tamanho da imagem recortada
+        # Resize the negative image to match the size of the cropped image
         cropped_neg_image = cv2.resize(self.neg_image, (cropped_image.shape[1], cropped_image.shape[0]))
 
-        # Subtrai a imagem negativa redimensionada da imagem recortada
+        # Subtract the resized negative image from the cropped image
         subtracted_image = cv2.subtract(cropped_image, cropped_neg_image)
-        self.display_image(subtracted_image, 'Subtracted Image')
+        self.display_image(subtracted_image, 'Subtracted')
+     
 
-        remove_background = self.remove_background(subtracted_image)
-        self.display_image(remove_background, 'Removed Background')
+        #Laplacian
+        filter_pdi = self.filter_pdi(subtracted_image)
+        self.display_image(filter_pdi, 'Laplacian Gray Balance')
+     
+
+        remove_background = self.remove_background(filter_pdi)
+        self.display_image(remove_background, 'Removed Background') 
 
         mask = self.create_mask(remove_background)
         self.display_image(mask, 'Mask')
@@ -202,13 +232,16 @@ class DetectMedicine:
             measures, measured_medicine = self.medicine_measures(remove_background, largest_contour)
             if measured_medicine is not None:
                 self.display_image(measured_medicine, 'Measured Medicine')
-
+                medicine_type = self.classify_medicine_type(measures[0], measures[3])
+                print(f'{measures[2]:.2f}, área do bb')
+                print(f'{measures[3]:.2f}, área da máscara')
+                print(f"Medicine Type: {medicine_type}")
 
 def main():
-    stag_id=6
-    image_path = "./img_6_009.jpg"
+    stag_id= 1
+    image_path = "./utils/thiago_fotos_ampola_black_lightdown/img_1_005.jpg"
     neg_image_path = "./neg_image_70x70.jpg"
-    detector = DetectMedicine(image_path,  neg_image_path , stag_id)
+    detector = DetectMedicine(image_path, neg_image_path, stag_id)
     detector.process_image()
 
 if __name__ == "__main__":
